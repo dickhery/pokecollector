@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("/assets/fonts/PlusJakartaSans.woff2") format("woff2");
+  font-weight: 200 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/assets/fonts/BricolageGrotesque.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    /* Light mode (unused - app is dark-only) */
+    --background: 0.145 0.008 265;
+    --foreground: 0.92 0.005 265;
+    --card: 0.18 0.008 265;
+    --card-foreground: 0.92 0.005 265;
+    --popover: 0.18 0.008 265;
+    --popover-foreground: 0.92 0.005 265;
+    --primary: 0.58 0.2 250;
+    --primary-foreground: 0.98 0 0;
+    --secondary: 0.22 0.008 265;
+    --secondary-foreground: 0.92 0.005 265;
+    --muted: 0.22 0.008 265;
+    --muted-foreground: 0.62 0.01 265;
+    --accent: 0.28 0.01 265;
+    --accent-foreground: 0.92 0.005 265;
+    --destructive: 0.577 0.245 27.325;
+    --destructive-foreground: 0.985 0 0;
+    --border: 0.28 0.012 265;
+    --input: 0.18 0.01 265;
+    --ring: 0.58 0.2 250;
+    --success: 0.65 0.18 145;
+    --success-foreground: 0.98 0 0;
+    --yellow-accent: 0.82 0.18 85;
+    --chart-1: 0.58 0.2 250;
+    --chart-2: 0.65 0.18 145;
+    --chart-3: 0.82 0.18 85;
+    --chart-4: 0.7 0.22 310;
+    --chart-5: 0.68 0.22 30;
+    --sidebar: 0.18 0.008 265;
+    --sidebar-foreground: 0.92 0.005 265;
+    --sidebar-primary: 0.58 0.2 250;
+    --sidebar-primary-foreground: 0.98 0 0;
+    --sidebar-accent: 0.22 0.008 265;
+    --sidebar-accent-foreground: 0.92 0.005 265;
+    --sidebar-border: 0.28 0.012 265;
+    --sidebar-ring: 0.58 0.2 250;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    /* Force dark mode always */
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+    background: oklch(0.115 0.01 265);
+    min-height: 100vh;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: oklch(0.18 0.008 265);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.32 0.012 265);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.42 0.015 265);
+  }
+}
+
+@layer utilities {
+  .text-price {
+    @apply font-bold text-foreground;
+    font-variant-numeric: tabular-nums;
+  }
+  .card-shimmer {
+    background: linear-gradient(
+      90deg,
+      oklch(0.22 0.008 265) 0%,
+      oklch(0.28 0.01 265) 50%,
+      oklch(0.22 0.008 265) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+  @keyframes shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+
+  .glow-blue {
+    box-shadow: 0 0 20px oklch(0.58 0.2 250 / 0.25);
+  }
+
+  .nav-link {
+    @apply text-sm font-medium transition-colors duration-150;
+    color: oklch(0.62 0.01 265);
+  }
+  .nav-link:hover {
+    color: oklch(0.92 0.005 265);
+  }
+  .nav-link.active {
+    color: oklch(0.92 0.005 265);
+    border-bottom: 2px solid oklch(0.58 0.2 250);
+    padding-bottom: 2px;
+  }
+
+  .pokemon-card-tile {
+    background: oklch(0.18 0.008 265);
+    border: 1px solid oklch(0.28 0.012 265);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+  }
+  .pokemon-card-tile:hover {
+    border-color: oklch(0.58 0.2 250 / 0.5);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px oklch(0 0 0 / 0.4);
+  }
+}
