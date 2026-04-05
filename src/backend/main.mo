@@ -46,8 +46,11 @@ actor {
   };
 
   // Vision API Key Management
-  var visionApiKey : Text = "AIzaSyCiOWBBPIk3HE_m3C5B7RrvVw7EZlhaiPo";
-  var nextId = 0;
+  // CHANGE: `stable` so the key survives canister upgrades.
+  // CHANGE: Default is empty -- no hardcoded key in source.
+  // Admin must call setVisionApiKey() via the admin dashboard to configure it.
+  stable var visionApiKey : Text = "";
+  stable var nextId = 0;
 
   // Stable storage for user collections
   let userCollections = Map.empty<Principal, Map.Map<Text, PokemonCard>>();
@@ -69,6 +72,12 @@ actor {
       Runtime.trap("Unauthorized: Only users can analyze card images");
     };
 
+    // CHANGE: Return a structured error if no key has been configured yet.
+    // The frontend reads this JSON and surfaces a clear message to the user.
+    if (visionApiKey == "") {
+      return "{\"error\":{\"code\":400,\"message\":\"Vision API key is not configured. An admin must set it via the admin dashboard.\",\"status\":\"FAILED_PRECONDITION\"}}";
+    };
+
     let url = "https://vision.googleapis.com/v1/images:annotate?key=" # visionApiKey;
     // Request both TEXT_DETECTION (for card number/name OCR) and WEB_DETECTION
     // (for visual web entity matching -- far more reliable for identifying Pokemon cards)
@@ -85,11 +94,17 @@ actor {
     visionApiKey := key;
   };
 
+  // CHANGE: Returns "(not set)" or "(configured)" -- never the raw key value.
+  // This prevents accidental key exposure in logs or UI while still letting
+  // the admin page show whether a key has been configured.
   public query ({ caller }) func getVisionApiKey() : async Text {
     if (not (AccessControl.hasPermission(accessControlState, caller, #admin))) {
       Runtime.trap("Unauthorized: Only admins can get Vision API key");
     };
-    visionApiKey;
+    if (visionApiKey == "") {
+      return "(not set)";
+    };
+    return "(configured)";
   };
 
   // Card collection management

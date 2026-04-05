@@ -91,7 +91,18 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
 
   const camera = useCamera({ facingMode: "environment" });
   const { startCamera, stopCamera } = camera;
-  const { actor } = useActor();
+  // Change 1: also destructure isFetching
+  const { actor, isFetching: actorLoading } = useActor();
+
+  // Change 2: debug log actor readiness on changes
+  useEffect(() => {
+    console.log(
+      "[ScanCard] actor ready:",
+      !!actor,
+      "actorLoading:",
+      actorLoading,
+    );
+  }, [actor, actorLoading]);
 
   const handleStop = useCallback(async () => {
     await stopCamera();
@@ -148,15 +159,25 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
   };
 
   const handleCapture = async () => {
-    // Attempt to capture with crop first; fall back to full frame if anything goes wrong
+    // Change 5: Guard — actor must be ready before we can run OCR
+    if (!actor) {
+      toast.error(
+        "Scanner backend is not ready yet. Please wait a moment and try again.",
+      );
+      return;
+    }
+
+    // Step 1: Capture the photo COMPLETELY before changing any state.
+    // Changing step triggers stopCamera() via useEffect, which sets isActive=false
+    // and would cause capturePhoto() to return null. So we MUST finish capture first.
     let photo: File | null = null;
 
+    // Try crop capture first (focuses on just the card inside the viewfinder)
     try {
       if (viewfinderRef.current && camera.videoRef.current) {
         const videoRect = camera.videoRef.current.getBoundingClientRect();
         const vfRect = viewfinderRef.current.getBoundingClientRect();
 
-        // Only crop if the viewfinder is actually overlapping the video area
         if (
           vfRect.width > 0 &&
           vfRect.height > 0 &&
@@ -176,48 +197,50 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
       console.warn("Crop capture failed, falling back to full frame:", err);
     }
 
-    // Fall back to full-frame capture if crop failed
+    // Fall back to full-frame if crop didn't work
     if (!photo) {
-      photo = await camera.capturePhoto();
+      try {
+        photo = await camera.capturePhoto();
+      } catch (err) {
+        console.warn("Full-frame capture failed:", err);
+      }
     }
 
-    if (photo) {
-      // Create a stable object URL for display
-      const imageUrl = URL.createObjectURL(photo);
-      setCapturedImage(imageUrl);
+    // Step 2: Only now that capture is done, transition to search step
+    if (!photo) {
+      toast.error(
+        "Failed to capture image. Make sure the camera is active and try again.",
+      );
+      return;
+    }
 
-      // Move to search step immediately so the user sees the image
-      setStep("search");
+    const imageUrl = URL.createObjectURL(photo);
+    setCapturedImage(imageUrl);
+    setIsOcrRunning(true);
+    setOcrDetected(null);
+    // Change step AFTER capture is complete -- this triggers stopCamera() safely
+    setStep("search");
 
-      // Run Vision OCR in background -- do NOT skip this even if we're on search step
-      setIsOcrRunning(true);
-      setOcrDetected(null);
-
-      try {
-        const result = await analyzeCardWithVision(imageUrl, actor);
-        setOcrDetected({
-          name: result.detectedName,
-          number: result.detectedNumber,
-        });
-        if (result.detectedName) {
-          setSearchQuery(result.detectedName);
-          // Auto-trigger search with detected name (and number if available)
-          await handleSearch(
-            result.detectedName,
-            result.detectedNumber ?? undefined,
-          );
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        toast.error(`Card scan failed: ${message}`);
-        // OCR failed -- mark as attempted so the UI shows the fallback state
-        setOcrDetected({ name: null, number: null });
-      } finally {
-        setIsOcrRunning(false);
+    // Step 3: Run Vision OCR analysis
+    try {
+      const result = await analyzeCardWithVision(imageUrl, actor);
+      setOcrDetected({
+        name: result.detectedName,
+        number: result.detectedNumber,
+      });
+      if (result.detectedName) {
+        setSearchQuery(result.detectedName);
+        await handleSearch(
+          result.detectedName,
+          result.detectedNumber ?? undefined,
+        );
       }
-    } else {
-      // Camera capture itself failed entirely
-      toast.error("Failed to capture image. Try again.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`Card scan failed: ${message}`);
+      setOcrDetected({ name: null, number: null });
+    } finally {
+      setIsOcrRunning(false);
     }
   };
 
@@ -353,6 +376,21 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                   </p>
                 </div>
 
+                {/* Change 4: Actor loading warning banner — above the camera viewport */}
+                {actorLoading && (
+                  <div
+                    className="flex items-center gap-2 px-3 py-2 rounded-md text-sm"
+                    style={{
+                      background: "oklch(0.18 0.06 50 / 0.3)",
+                      border: "1px solid oklch(0.45 0.1 50 / 0.4)",
+                      color: "oklch(0.82 0.1 50)",
+                    }}
+                  >
+                    <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                    <span>Connecting to scanner backend…</span>
+                  </div>
+                )}
+
                 {/* Camera viewport */}
                 <div
                   className="relative rounded-lg overflow-hidden"
@@ -471,7 +509,13 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                   <button
                     type="button"
                     onClick={handleCapture}
-                    disabled={!camera.isActive || camera.isLoading}
+                    // Change 3: also disable when actor is not ready
+                    disabled={
+                      !camera.isActive ||
+                      camera.isLoading ||
+                      actorLoading ||
+                      !actor
+                    }
                     className="flex-1 py-3 text-sm font-semibold rounded-md flex items-center justify-center gap-2 transition-colors disabled:opacity-40"
                     style={{
                       background: "oklch(0.58 0.2 250)",

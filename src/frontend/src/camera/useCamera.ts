@@ -13,6 +13,7 @@ export interface CameraError {
   message: string;
 }
 
+/** CSS-pixel rectangle relative to the video element's bounding box. */
 export interface CropRect {
   x: number;
   y: number;
@@ -323,14 +324,22 @@ export const useCamera = (config: CameraConfig = {}) => {
   }, [isActive, format, quality, currentFacingMode]);
 
   /**
-   * Capture a photo cropped to the specified rectangle.
-   * cropRect coordinates are in CSS pixels relative to the video element's
-   * rendered bounding box. They are mapped to the video's native resolution.
+   * Capture only the region visible inside the on-screen viewfinder rectangle.
+   *
+   * The video element uses `object-fit: cover`, which means the native video
+   * frame is scaled UP uniformly so the shorter dimension fills the element,
+   * and the longer dimension is center-cropped. The CSS-pixel crop rect we
+   * receive is relative to the rendered video element's top-left corner, so
+   * we must account for that cover-offset before sampling native pixels.
+   *
+   * @param cssPixelCropRect - Rectangle relative to videoRef.current's
+   *   getBoundingClientRect(), in CSS pixels (device-independent).
    */
   const capturePhotoWithCrop = useCallback(
-    (cropRect: CropRect): Promise<File | null> => {
+    (cssPixelCropRect: CropRect): Promise<File | null> => {
       return new Promise((resolve) => {
         if (!videoRef.current || !canvasRef.current || !isActive) {
+          console.warn("[Camera] capturePhotoWithCrop: camera not active");
           resolve(null);
           return;
         }
@@ -340,37 +349,69 @@ export const useCamera = (config: CameraConfig = {}) => {
 
         const nativeW = video.videoWidth;
         const nativeH = video.videoHeight;
+        const renderedW = video.clientWidth;
+        const renderedH = video.clientHeight;
 
-        // The video element's rendered size (CSS pixels)
-        const renderedRect = video.getBoundingClientRect();
-        const renderedW = renderedRect.width;
-        const renderedH = renderedRect.height;
-
-        if (renderedW === 0 || renderedH === 0) {
-          // Fall back to full capture
-          resolve(capturePhoto());
+        if (
+          nativeW === 0 ||
+          nativeH === 0 ||
+          renderedW === 0 ||
+          renderedH === 0
+        ) {
+          console.warn(
+            "[Camera] capturePhotoWithCrop: zero dimensions, falling back",
+          );
+          resolve(null);
           return;
         }
 
-        // Scale factors from rendered (CSS) coordinates to native video pixels
+        // --- object-fit: cover math ---
+        // The video is scaled so the LARGER scale factor fills the element,
+        // then the excess is cropped equally on both sides.
         const scaleX = nativeW / renderedW;
         const scaleY = nativeH / renderedH;
+        // cover uses the LARGER scale so neither side under-fills
+        const scale = Math.max(scaleX, scaleY);
 
-        // Map the crop rect to native video coordinates
-        const sx = Math.max(0, Math.round(cropRect.x * scaleX));
-        const sy = Math.max(0, Math.round(cropRect.y * scaleY));
-        const sw = Math.min(nativeW - sx, Math.round(cropRect.width * scaleX));
-        const sh = Math.min(nativeH - sy, Math.round(cropRect.height * scaleY));
+        // Offset of the native frame's top-left relative to the rendered element
+        // (negative means the native frame extends beyond the rendered element)
+        const offsetX = (nativeW - renderedW * scale) / 2;
+        const offsetY = (nativeH - renderedH * scale) / 2;
 
-        if (sw <= 0 || sh <= 0) {
-          // Crop rect is invalid, fall back to full capture
-          resolve(capturePhoto());
+        // Map the CSS-pixel crop rect to native pixel coordinates
+        const srcX = Math.round(cssPixelCropRect.x * scale + offsetX);
+        const srcY = Math.round(cssPixelCropRect.y * scale + offsetY);
+        const srcW = Math.round(cssPixelCropRect.width * scale);
+        const srcH = Math.round(cssPixelCropRect.height * scale);
+
+        console.log("[Camera] object-fit cover crop:", {
+          native: `${nativeW}x${nativeH}`,
+          rendered: `${renderedW}x${renderedH}`,
+          scale,
+          offsetX,
+          offsetY,
+          srcX,
+          srcY,
+          srcW,
+          srcH,
+        });
+
+        // Clamp to native video bounds
+        const clampedX = Math.max(0, srcX);
+        const clampedY = Math.max(0, srcY);
+        const clampedW = Math.min(srcW, nativeW - clampedX);
+        const clampedH = Math.min(srcH, nativeH - clampedY);
+
+        if (clampedW <= 0 || clampedH <= 0) {
+          console.warn(
+            "[Camera] capturePhotoWithCrop: crop out of bounds, falling back to full frame",
+          );
+          resolve(null);
           return;
         }
 
-        // Draw only the cropped region onto the canvas
-        canvas.width = sw;
-        canvas.height = sh;
+        canvas.width = clampedW;
+        canvas.height = clampedH;
 
         const ctx = canvas.getContext("2d");
         if (!ctx) {
@@ -378,24 +419,28 @@ export const useCamera = (config: CameraConfig = {}) => {
           return;
         }
 
-        // For front camera, mirror horizontally
-        if (currentFacingMode === "user") {
-          ctx.translate(sw, 0);
-          ctx.scale(-1, 1);
-          ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-        } else {
-          ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-        }
+        // Draw only the cropped region
+        ctx.drawImage(
+          video,
+          clampedX,
+          clampedY,
+          clampedW,
+          clampedH, // source rect (native pixels)
+          0,
+          0,
+          clampedW,
+          clampedH, // destination rect
+        );
+
+        console.log("[Camera] Crop captured:", `${clampedW}x${clampedH}`, "px");
 
         canvas.toBlob(
           (blob) => {
             if (blob) {
               const extension = format.split("/")[1];
-              const file = new File(
-                [blob],
-                `photo_crop_${Date.now()}.${extension}`,
-                { type: format },
-              );
+              const file = new File([blob], `crop_${Date.now()}.${extension}`, {
+                type: format,
+              });
               resolve(file);
             } else {
               resolve(null);
@@ -406,7 +451,7 @@ export const useCamera = (config: CameraConfig = {}) => {
         );
       });
     },
-    [isActive, format, quality, currentFacingMode, capturePhoto],
+    [isActive, format, quality],
   );
 
   return {

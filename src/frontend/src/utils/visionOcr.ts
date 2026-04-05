@@ -29,7 +29,6 @@ function isNoiseLine(line: string): boolean {
 }
 
 function cleanPokemonName(raw: string): string {
-  // Remove trailing punctuation and normalize whitespace
   return raw
     .replace(/[^a-zA-Z0-9\s.'-]/g, " ")
     .replace(/\s+/g, " ")
@@ -75,7 +74,6 @@ function parseCardText(text: string): {
   const candidates = lines.filter((line) => {
     if (isNoiseLine(line)) return false;
     if (line.length < 3 || line.length > 40) return false;
-    // Must contain letters
     if (!/[a-zA-Z]/.test(line)) return false;
     // Reject all-caps lines longer than 6 chars (usually flavor text or labels)
     if (line === line.toUpperCase() && line.length > 6) return false;
@@ -98,6 +96,7 @@ function parseCardText(text: string): {
 }
 
 // --- Vision API response types ---
+// NOTE: Google Vision API returns "webDetection", NOT "webDetectionAnnotation"
 
 interface WebEntity {
   entityId?: string;
@@ -105,7 +104,7 @@ interface WebEntity {
   description?: string;
 }
 
-interface WebDetectionAnnotation {
+interface WebDetection {
   webEntities?: WebEntity[];
   bestGuessLabels?: Array<{ label: string; languageCode?: string }>;
 }
@@ -113,7 +112,8 @@ interface WebDetectionAnnotation {
 interface VisionResponse {
   responses?: Array<{
     textAnnotations?: Array<{ description: string }>;
-    webDetectionAnnotation?: WebDetectionAnnotation;
+    // Correct field name from Google Vision API
+    webDetection?: WebDetection;
     error?: { message: string; code?: number };
   }>;
   error?: { message: string; code?: number };
@@ -152,6 +152,13 @@ async function compressImageToBase64(imageUrl: string): Promise<string> {
       const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
       const comma = dataUrl.indexOf(",");
       const base64 = comma !== -1 ? dataUrl.slice(comma + 1) : dataUrl;
+      console.log(
+        "[VisionOCR] Compressed image size:",
+        base64.length,
+        "chars (~",
+        Math.round((base64.length * 0.75) / 1024),
+        "KB)",
+      );
       resolve(base64);
     };
     img.onerror = () =>
@@ -162,10 +169,10 @@ async function compressImageToBase64(imageUrl: string): Promise<string> {
 
 /**
  * Extract the best card name from WEB_DETECTION results.
- * Prioritizes bestGuessLabel, then top-scored webEntities.
+ * Prioritizes bestGuessLabels, then top-scored webEntities.
  */
 function extractNameFromWebDetection(
-  webDetection: WebDetectionAnnotation | undefined,
+  webDetection: WebDetection | undefined,
 ): string | null {
   if (!webDetection) return null;
 
@@ -173,7 +180,10 @@ function extractNameFromWebDetection(
   const bestGuess = webDetection.bestGuessLabels?.[0]?.label;
   if (bestGuess) {
     const name = extractNameFromWebLabel(bestGuess);
-    if (name && name.length >= 3) return name;
+    if (name && name.length >= 3) {
+      console.log("[VisionOCR] Name from bestGuessLabel:", name);
+      return name;
+    }
   }
 
   // Fall back to top-scored web entity
@@ -184,7 +194,15 @@ function extractNameFromWebDetection(
   for (const entity of entities) {
     if (!entity.description) continue;
     const name = extractNameFromWebLabel(entity.description);
-    if (name && name.length >= 3) return name;
+    if (name && name.length >= 3) {
+      console.log(
+        "[VisionOCR] Name from webEntity:",
+        name,
+        "score:",
+        entity.score,
+      );
+      return name;
+    }
   }
 
   return null;
@@ -194,60 +212,77 @@ export async function analyzeCardWithVision(
   imageUrl: string,
   actor: backendInterface | null,
 ): Promise<OcrCardResult> {
-  const empty: OcrCardResult = {
-    detectedName: null,
-    detectedNumber: null,
-    rawText: "",
-  };
-
-  if (!actor) return empty;
-
-  try {
-    const base64String = await compressImageToBase64(imageUrl);
-    const rawJson = await actor.analyzeCardImage(base64String);
-
-    let parsed: VisionResponse;
-    try {
-      parsed = JSON.parse(rawJson) as VisionResponse;
-    } catch {
-      toast.error("Card scan failed: Could not parse Vision API response");
-      return empty;
-    }
-
-    // Top-level API error (e.g. billing not enabled, invalid key)
-    if (parsed.error) {
-      toast.error(`Card scan failed: ${parsed.error.message}`);
-      return empty;
-    }
-
-    const firstResponse = parsed.responses?.[0];
-    if (!firstResponse) return empty;
-
-    // Per-response error
-    if (firstResponse.error) {
-      toast.error(`Card scan failed: ${firstResponse.error.message}`);
-      return empty;
-    }
-
-    // --- Extract card number from TEXT_DETECTION (most reliable for numbers) ---
-    const fullText = firstResponse.textAnnotations?.[0]?.description ?? "";
-    const { number: detectedNumber } = parseCardText(fullText);
-
-    // --- Extract card name: prefer WEB_DETECTION, fall back to TEXT_DETECTION ---
-    const webName = extractNameFromWebDetection(
-      firstResponse.webDetectionAnnotation,
+  // CHANGE: Throw instead of silently returning empty when actor is not ready.
+  // ScanCard.tsx should guard this, but belt-and-suspenders here.
+  if (!actor) {
+    throw new Error(
+      "Scanner backend is not ready yet. Please wait a moment and try again.",
     );
-    const { name: ocrName } = parseCardText(fullText);
-    const detectedName = webName ?? ocrName;
+  }
 
-    return {
-      detectedName,
-      detectedNumber,
-      rawText: fullText,
-    };
+  console.log("[VisionOCR] Actor ready, starting Vision request");
+
+  const base64String = await compressImageToBase64(imageUrl);
+
+  console.log("[VisionOCR] Sending image to backend analyzeCardImage");
+  let rawJson: string;
+  try {
+    rawJson = await actor.analyzeCardImage(base64String);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    toast.error(`Card scan failed: ${message}`);
-    return empty;
+    throw new Error(`Backend call failed: ${message}`);
   }
+
+  console.log(
+    "[VisionOCR] Raw Vision response (first 500 chars):",
+    rawJson.slice(0, 500),
+  );
+
+  let parsed: VisionResponse;
+  try {
+    parsed = JSON.parse(rawJson) as VisionResponse;
+  } catch {
+    throw new Error(
+      "Could not parse Vision API response. The backend may have returned an unexpected format.",
+    );
+  }
+
+  // Top-level API error (e.g. billing not enabled, invalid key)
+  if (parsed.error) {
+    const detail = parsed.error.message ?? "Unknown Vision API error";
+    throw new Error(`Vision API error: ${detail}`);
+  }
+
+  const firstResponse = parsed.responses?.[0];
+  if (!firstResponse) {
+    throw new Error("Vision API returned an empty response array.");
+  }
+
+  // Per-response error (e.g. missing key, quota exceeded)
+  if (firstResponse.error) {
+    const detail = firstResponse.error.message ?? "Unknown Vision API error";
+    throw new Error(`Vision API error: ${detail}`);
+  }
+
+  // --- Extract card number from TEXT_DETECTION (most reliable for numbers) ---
+  const fullText = firstResponse.textAnnotations?.[0]?.description ?? "";
+  const { number: detectedNumber } = parseCardText(fullText);
+
+  // --- Extract card name: prefer webDetection, fall back to TEXT_DETECTION ---
+  // CHANGE: was "webDetectionAnnotation" -- Google Vision actually returns "webDetection"
+  const webName = extractNameFromWebDetection(firstResponse.webDetection);
+  const { name: ocrName } = parseCardText(fullText);
+  const detectedName = webName ?? ocrName;
+
+  console.log("[VisionOCR] Parsed result:", {
+    detectedName,
+    detectedNumber,
+    ocrText: fullText.slice(0, 100),
+  });
+
+  return {
+    detectedName,
+    detectedNumber,
+    rawText: fullText,
+  };
 }
