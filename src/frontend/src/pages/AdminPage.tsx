@@ -1,5 +1,12 @@
 import type { Principal } from "@icp-sdk/core/principal";
-import { Eye, EyeOff, KeyRound, Loader2, Save, Users } from "lucide-react";
+import {
+  CheckCircle2,
+  KeyRound,
+  Loader2,
+  Save,
+  Users,
+  XCircle,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import type { backendInterface } from "../backend";
@@ -11,13 +18,13 @@ interface AdminPageProps {
 function truncatePrincipal(principal: Principal): string {
   const str = principal.toString();
   if (str.length <= 20) return str;
-  return `${str.slice(0, 10)}…${str.slice(-6)}`;
+  return `${str.slice(0, 10)}\u2026${str.slice(-6)}`;
 }
 
 export default function AdminPage({ actor }: AdminPageProps) {
-  const [apiKey, setApiKey] = useState("");
+  // "(not set)" | "(configured)" -- never the real key value
+  const [keyStatus, setKeyStatus] = useState<string | null>(null);
   const [newApiKey, setNewApiKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingKey, setIsLoadingKey] = useState(true);
   const [users, setUsers] = useState<Principal[]>([]);
@@ -26,16 +33,12 @@ export default function AdminPage({ actor }: AdminPageProps) {
   useEffect(() => {
     if (!actor) return;
 
-    // Load API key and users in parallel
     const loadKey = actor
       .getVisionApiKey()
-      .then((key) => {
-        setApiKey(key);
-        setNewApiKey(key);
-      })
+      .then((status) => setKeyStatus(status))
       .catch((err) => {
-        console.error("Failed to load API key:", err);
-        toast.error("Failed to load API key");
+        console.error("Failed to load API key status:", err);
+        toast.error("Failed to load API key status");
       })
       .finally(() => setIsLoadingKey(false));
 
@@ -50,17 +53,15 @@ export default function AdminPage({ actor }: AdminPageProps) {
     void Promise.all([loadKey, loadUsers]);
   }, [actor]);
 
-  const maskedKey =
-    apiKey.length > 8
-      ? `${apiKey.slice(0, 4)}${".".repeat(6)}${apiKey.slice(-2)}`
-      : apiKey;
+  const isKeyConfigured = keyStatus === "(configured)";
 
   const handleSaveKey = async () => {
     if (!actor || !newApiKey.trim()) return;
     setIsSaving(true);
     try {
       await actor.setVisionApiKey(newApiKey.trim());
-      setApiKey(newApiKey.trim());
+      setKeyStatus("(configured)");
+      setNewApiKey("");
       toast.success("Vision API key saved successfully");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -123,64 +124,58 @@ export default function AdminPage({ actor }: AdminPageProps) {
             data-ocid="admin.api_key.loading_state"
           >
             <Loader2 className="w-4 h-4 animate-spin" />
-            Loading current key…
+            Checking key status…
           </div>
         ) : (
-          <div className="space-y-3">
-            {/* Current key display */}
-            <div>
+          <div className="space-y-4">
+            {/* Current status badge */}
+            <div className="flex items-center gap-2">
               <span
-                className="text-xs uppercase tracking-wider block mb-1.5"
+                className="text-xs uppercase tracking-wider"
                 style={{ color: "oklch(0.42 0.01 265)" }}
               >
-                Current Key
+                Current Status
               </span>
-              <div className="flex items-center gap-2">
-                <code
-                  className="flex-1 px-3 py-2 rounded-md text-sm font-mono border"
-                  style={{
-                    background: "oklch(0.145 0.01 265)",
-                    borderColor: "oklch(0.28 0.012 265)",
-                    color: "oklch(0.72 0.18 250)",
-                  }}
-                >
-                  {showKey ? apiKey : maskedKey}
-                </code>
-                <button
-                  type="button"
-                  onClick={() => setShowKey((v) => !v)}
-                  className="p-2 rounded-md border transition-colors flex-shrink-0"
-                  style={{
-                    background: "oklch(0.155 0.01 265)",
-                    borderColor: "oklch(0.28 0.012 265)",
-                    color: "oklch(0.62 0.01 265)",
-                  }}
-                  title={showKey ? "Hide key" : "Reveal key"}
-                  data-ocid="admin.api_key.toggle"
-                >
-                  {showKey ? (
-                    <EyeOff className="w-4 h-4" />
-                  ) : (
-                    <Eye className="w-4 h-4" />
-                  )}
-                </button>
-              </div>
+              <span
+                className="flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded"
+                style={{
+                  background: isKeyConfigured
+                    ? "oklch(0.65 0.18 145 / 0.15)"
+                    : "oklch(0.65 0.18 30 / 0.15)",
+                  color: isKeyConfigured
+                    ? "oklch(0.65 0.18 145)"
+                    : "oklch(0.70 0.18 30)",
+                }}
+                data-ocid="admin.api_key.status_badge"
+              >
+                {isKeyConfigured ? (
+                  <>
+                    <CheckCircle2 className="w-3 h-3" />
+                    Key configured
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="w-3 h-3" />
+                    No key set
+                  </>
+                )}
+              </span>
             </div>
 
-            {/* Update key */}
+            {/* Set / update key input */}
             <div>
               <span
                 className="text-xs uppercase tracking-wider block mb-1.5"
                 style={{ color: "oklch(0.42 0.01 265)" }}
               >
-                Update Key
+                {isKeyConfigured ? "Replace Key" : "Set Key"}
               </span>
               <div className="flex gap-2">
                 <input
-                  type="text"
+                  type="password"
                   value={newApiKey}
                   onChange={(e) => setNewApiKey(e.target.value)}
-                  placeholder="Enter new Vision API key…"
+                  placeholder="Paste your Vision API key…"
                   className="flex-1 px-3 py-2 text-sm rounded-md border outline-none"
                   style={{
                     background: "oklch(0.145 0.01 265)",
@@ -208,6 +203,13 @@ export default function AdminPage({ actor }: AdminPageProps) {
                   {isSaving ? "Saving…" : "Save Key"}
                 </button>
               </div>
+              <p
+                className="text-xs mt-2"
+                style={{ color: "oklch(0.42 0.01 265)" }}
+              >
+                The key is stored securely on the backend canister and is never
+                exposed to the browser.
+              </p>
             </div>
           </div>
         )}

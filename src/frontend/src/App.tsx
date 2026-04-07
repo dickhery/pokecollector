@@ -15,7 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useActor } from "./hooks/useActor";
 import { useCollection } from "./hooks/useCollection";
 import { useInternetIdentity } from "./hooks/useInternetIdentity";
@@ -69,7 +69,7 @@ function LoginScreen() {
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             transition={{ duration: 0.4, delay: 0.1 }}
-            src="/assets/generated/pikachu-icon-transparent.dim_64x64.png"
+            src="/assets/generated/pikachu-icon-transparent.dim_128x128.png"
             alt="⚡"
             className="w-20 h-20 object-contain drop-shadow-lg"
           />
@@ -146,6 +146,16 @@ export default function App() {
 
   const collection = useCollection();
 
+  // 3-tap counter for hidden admin dashboard access.
+  // All refs are declared unconditionally before any early return.
+  const tapCountRef = useRef(0);
+  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keep a ref to the latest actor so the handler closure is always fresh.
+  const actorRef = useRef(actor);
+  actorRef.current = actor;
+  const setActivePageRef = useRef(setActivePage);
+  setActivePageRef.current = setActivePage;
+
   // Auth wall: show login screen if not authenticated
   if (!identity) {
     return (
@@ -177,17 +187,32 @@ export default function App() {
     }
   };
 
+  // Tap 3 times within 1.5 s to open the admin dashboard.
   const handleLogoClick = async () => {
-    if (!actor) return;
+    const currentActor = actorRef.current;
+    if (!currentActor) return;
+
+    tapCountRef.current += 1;
+
+    if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+    tapTimerRef.current = setTimeout(() => {
+      tapCountRef.current = 0;
+    }, 1500);
+
+    if (tapCountRef.current < 3) return;
+
+    // Third tap reached — reset and check admin status
+    tapCountRef.current = 0;
+    if (tapTimerRef.current) {
+      clearTimeout(tapTimerRef.current);
+      tapTimerRef.current = null;
+    }
+
     try {
-      const isAdmin = await actor.isCallerAdmin();
-      if (isAdmin) {
-        setActivePage("admin");
-      } else {
-        setActivePage("dashboard");
-      }
+      const isAdmin = await currentActor.isCallerAdmin();
+      setActivePageRef.current(isAdmin ? "admin" : "dashboard");
     } catch {
-      setActivePage("dashboard");
+      setActivePageRef.current("dashboard");
     }
   };
 
@@ -211,7 +236,7 @@ export default function App() {
       >
         <div className="max-w-[1200px] mx-auto px-4 sm:px-6">
           <div className="flex items-center gap-4 h-14">
-            {/* Brand / Logo — tap to access admin if admin */}
+            {/* Brand / Logo — tap 3 times quickly to access admin */}
             <button
               type="button"
               className="flex items-center gap-2 flex-shrink-0 cursor-pointer bg-transparent border-0 p-0"
@@ -220,7 +245,7 @@ export default function App() {
               data-ocid="nav.brand_link"
             >
               <img
-                src="/assets/generated/pikachu-icon-transparent.dim_64x64.png"
+                src="/assets/generated/pikachu-icon-transparent.dim_128x128.png"
                 alt="⚡"
                 className="w-7 h-7 object-contain"
               />

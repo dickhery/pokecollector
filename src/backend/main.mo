@@ -46,8 +46,8 @@ actor {
   };
 
   // Vision API Key Management
-  // CHANGE: `stable` so the key survives canister upgrades.
-  // CHANGE: Default is empty -- no hardcoded key in source.
+  // `stable` so the key survives canister upgrades.
+  // Default is empty -- no hardcoded key in source.
   // Admin must call setVisionApiKey() via the admin dashboard to configure it.
   stable var visionApiKey : Text = "";
   stable var nextId = 0;
@@ -59,10 +59,13 @@ actor {
   include MixinStorage();
 
   // Authorization mixin
+  // Note: isCallerAdmin() is already provided by MixinAuthorization -- do not redefine it here.
   let accessControlState = AccessControl.initState();
   include MixinAuthorization(accessControlState);
 
-  // Analyze card image using Vision API (TEXT_DETECTION + WEB_DETECTION)
+  // Analyze card image using Vision API
+  // Features: DOCUMENT_TEXT_DETECTION (dense OCR) + WEB_DETECTION (visual web matching)
+  // imageContext enables per-symbol confidence scores for better post-processing
   public query func transform(input : Outcall.TransformationInput) : async Outcall.TransformationOutput {
     Outcall.transform(input);
   };
@@ -72,16 +75,24 @@ actor {
       Runtime.trap("Unauthorized: Only users can analyze card images");
     };
 
-    // CHANGE: Return a structured error if no key has been configured yet.
+    // Return a structured error if no key has been configured yet.
     // The frontend reads this JSON and surfaces a clear message to the user.
     if (visionApiKey == "") {
       return "{\"error\":{\"code\":400,\"message\":\"Vision API key is not configured. An admin must set it via the admin dashboard.\",\"status\":\"FAILED_PRECONDITION\"}}";
     };
 
     let url = "https://vision.googleapis.com/v1/images:annotate?key=" # visionApiKey;
-    // Request both TEXT_DETECTION (for card number/name OCR) and WEB_DETECTION
-    // (for visual web entity matching -- far more reliable for identifying Pokemon cards)
-    let body = "{\"requests\":[{\"image\":{\"content\":\"" # base64Image # "\"},\"features\":[{\"type\":\"TEXT_DETECTION\",\"maxResults\":1},{\"type\":\"WEB_DETECTION\",\"maxResults\":5}]}]}";
+
+    // Using three complementary features:
+    //   DOCUMENT_TEXT_DETECTION -- dense OCR optimised for documents/cards; returns
+    //     fullTextAnnotation with per-block/word/symbol structure and confidence.
+    //   WEB_DETECTION -- visual web-entity matching; the most reliable way to
+    //     identify the exact card by appearance even when OCR is imperfect.
+    //
+    // imageContext.textDetectionParams.enableTextDetectionConfidenceScore = true
+    //   asks Vision to attach confidence values to each OCR symbol so the frontend
+    //   can judge how trustworthy the OCR result is.
+    let body = "{\"requests\":[{\"image\":{\"content\":\"" # base64Image # "\"},\"features\":[{\"type\":\"DOCUMENT_TEXT_DETECTION\",\"maxResults\":1},{\"type\":\"WEB_DETECTION\",\"maxResults\":10}],\"imageContext\":{\"textDetectionParams\":{\"enableTextDetectionConfidenceScore\":true}}}]}";
     let headers : [Outcall.Header] = [{ name = "Content-Type"; value = "application/json" }];
     await Outcall.httpPostRequest(url, headers, body, transform);
   };
@@ -94,7 +105,7 @@ actor {
     visionApiKey := key;
   };
 
-  // CHANGE: Returns "(not set)" or "(configured)" -- never the raw key value.
+  // Returns "(not set)" or "(configured)" -- never the raw key value.
   // This prevents accidental key exposure in logs or UI while still letting
   // the admin page show whether a key has been configured.
   public query ({ caller }) func getVisionApiKey() : async Text {

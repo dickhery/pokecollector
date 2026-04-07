@@ -21,29 +21,18 @@ import { toast } from "sonner";
 import { useCamera } from "../camera/useCamera";
 import { useActor } from "../hooks/useActor";
 import type { CollectionCard } from "../hooks/useCollection";
+import {
+  type PokemonTCGCard,
+  getCardPrice,
+  searchByName,
+  searchForPokemonCard,
+} from "../utils/pokemonCardSearch";
+import type { OcrCardResult } from "../utils/visionOcr";
 import { analyzeCardWithVision } from "../utils/visionOcr";
 
 interface ScanCardProps {
   onClose: () => void;
   onAddCard: (card: Omit<CollectionCard, "id" | "dateAdded">) => void;
-}
-
-interface PokemonTCGCard {
-  id: string;
-  name: string;
-  images: { small: string; large: string };
-  set: { name: string; id: string };
-  number: string;
-  rarity?: string;
-  types?: string[];
-  tcgplayer?: {
-    prices?: {
-      holofoil?: { market?: number };
-      normal?: { market?: number };
-      "1stEditionHolofoil"?: { market?: number };
-      reverseHolofoil?: { market?: number };
-    };
-  };
 }
 
 type Step = "camera" | "search" | "confirm";
@@ -57,17 +46,35 @@ const CONDITIONS: Condition[] = [
   "Poor",
 ];
 
-function getCardPrice(card: PokemonTCGCard): number {
-  const prices = card.tcgplayer?.prices;
-  if (!prices) return 0;
-  return (
-    prices.holofoil?.market ??
-    prices["1stEditionHolofoil"]?.market ??
-    prices.normal?.market ??
-    prices.reverseHolofoil?.market ??
-    0
-  );
-}
+const CONFIDENCE_BADGE: Record<
+  OcrCardResult["confidenceBucket"],
+  { label: string; style: React.CSSProperties }
+> = {
+  high: {
+    label: "High confidence",
+    style: {
+      background: "oklch(0.18 0.08 145 / 0.25)",
+      border: "1px solid oklch(0.45 0.12 145 / 0.4)",
+      color: "oklch(0.72 0.12 145)",
+    },
+  },
+  medium: {
+    label: "Medium confidence",
+    style: {
+      background: "oklch(0.18 0.08 70 / 0.25)",
+      border: "1px solid oklch(0.5 0.12 70 / 0.4)",
+      color: "oklch(0.78 0.12 70)",
+    },
+  },
+  low: {
+    label: "Low confidence",
+    style: {
+      background: "oklch(0.18 0.06 30 / 0.25)",
+      border: "1px solid oklch(0.45 0.1 30 / 0.4)",
+      color: "oklch(0.75 0.1 30)",
+    },
+  },
+};
 
 export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
   const [step, setStep] = useState<Step>("camera");
@@ -81,20 +88,15 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
   const [condition, setCondition] = useState<Condition>("Near Mint");
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isOcrRunning, setIsOcrRunning] = useState(false);
-  const [ocrDetected, setOcrDetected] = useState<{
-    name: string | null;
-    number: string | null;
-  } | null>(null);
+  const [ocrHints, setOcrHints] = useState<OcrCardResult | null>(null);
   const [customValueInput, setCustomValueInput] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const viewfinderRef = useRef<HTMLDivElement>(null);
 
   const camera = useCamera({ facingMode: "environment" });
   const { startCamera, stopCamera } = camera;
-  // Change 1: also destructure isFetching
   const { actor, isFetching: actorLoading } = useActor();
 
-  // Change 2: debug log actor readiness on changes
   useEffect(() => {
     console.log(
       "[ScanCard] actor ready:",
@@ -108,7 +110,6 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
     await stopCamera();
   }, [stopCamera]);
 
-  // Start camera when on camera step
   useEffect(() => {
     if (step === "camera") {
       startCamera();
@@ -120,64 +121,56 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
     };
   }, [step, startCamera, handleStop]);
 
-  // Focus search input when on search step
   useEffect(() => {
     if (step === "search") {
       setTimeout(() => searchInputRef.current?.focus(), 100);
     }
   }, [step]);
 
-  const handleSearch = async (query: string, cardNumber?: string) => {
+  // ---------------------------------------------------------------------------
+  // Manual search (search bar)
+  // ---------------------------------------------------------------------------
+
+  const handleManualSearch = async (query: string) => {
     if (!query.trim()) return;
     setIsSearching(true);
     setResults([]);
     try {
-      let url = `https://api.pokemontcg.io/v2/cards?q=name:${encodeURIComponent(query.trim())}*&pageSize=16`;
-      // If we have a card number, add it to narrow results
-      if (cardNumber) {
-        url = `https://api.pokemontcg.io/v2/cards?q=name:${encodeURIComponent(query.trim())}* number:${encodeURIComponent(cardNumber)}&pageSize=16`;
-      }
-      const res = await fetch(url);
-      const data = (await res.json()) as { data: PokemonTCGCard[] };
-      // If number search returned nothing, fall back to name only
-      if (cardNumber && (!data.data || data.data.length === 0)) {
-        const fallback = await fetch(
-          `https://api.pokemontcg.io/v2/cards?q=name:${encodeURIComponent(query.trim())}*&pageSize=16`,
-        );
-        const fallbackData = (await fallback.json()) as {
-          data: PokemonTCGCard[];
-        };
-        setResults(fallbackData.data ?? []);
-      } else {
-        setResults(data.data ?? []);
+      console.log("[ScanCard] Manual search:", query);
+      const cards = await searchByName(query);
+      setResults(cards);
+      if (cards.length === 0) {
+        // Don't toast for empty -- the empty-state UI handles it
       }
     } catch {
-      toast.error("Failed to search. Check your connection.");
+      toast.error("Search failed. Check your connection.");
     } finally {
       setIsSearching(false);
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Capture & Vision OCR flow
+  // ---------------------------------------------------------------------------
+
   const handleCapture = async () => {
-    // Change 5: Guard — actor must be ready before we can run OCR
     if (!actor) {
       toast.error(
-        "Scanner backend is not ready yet. Please wait a moment and try again.",
+        actorLoading
+          ? "Scanner backend is still loading. Please wait a moment."
+          : "Scanner backend is not available. Try refreshing the page.",
       );
       return;
     }
 
-    // Step 1: Capture the photo COMPLETELY before changing any state.
-    // Changing step triggers stopCamera() via useEffect, which sets isActive=false
-    // and would cause capturePhoto() to return null. So we MUST finish capture first.
+    // Capture BEFORE changing step (step change triggers stopCamera)
     let photo: File | null = null;
+    let usedCrop = false;
 
-    // Try crop capture first (focuses on just the card inside the viewfinder)
     try {
       if (viewfinderRef.current && camera.videoRef.current) {
         const videoRect = camera.videoRef.current.getBoundingClientRect();
         const vfRect = viewfinderRef.current.getBoundingClientRect();
-
         if (
           vfRect.width > 0 &&
           vfRect.height > 0 &&
@@ -191,22 +184,24 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
             height: vfRect.height,
           };
           photo = await camera.capturePhotoWithCrop(cropRect);
+          if (photo) usedCrop = true;
         }
       }
     } catch (err) {
-      console.warn("Crop capture failed, falling back to full frame:", err);
+      console.warn("[ScanCard] Crop capture failed, trying full-frame:", err);
     }
 
-    // Fall back to full-frame if crop didn't work
     if (!photo) {
       try {
         photo = await camera.capturePhoto();
+        console.log("[ScanCard] Using full-frame capture");
       } catch (err) {
-        console.warn("Full-frame capture failed:", err);
+        console.warn("[ScanCard] Full-frame capture failed:", err);
       }
+    } else {
+      console.log("[ScanCard] Using cropped capture (viewfinder)");
     }
 
-    // Step 2: Only now that capture is done, transition to search step
     if (!photo) {
       toast.error(
         "Failed to capture image. Make sure the camera is active and try again.",
@@ -214,31 +209,76 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
       return;
     }
 
+    console.log(
+      `[ScanCard] Captured image (${usedCrop ? "cropped" : "full-frame"}): ${photo.size} bytes`,
+    );
+
     const imageUrl = URL.createObjectURL(photo);
     setCapturedImage(imageUrl);
     setIsOcrRunning(true);
-    setOcrDetected(null);
-    // Change step AFTER capture is complete -- this triggers stopCamera() safely
-    setStep("search");
+    setOcrHints(null);
+    setStep("search"); // safe now — capture is done
 
-    // Step 3: Run Vision OCR analysis
     try {
-      const result = await analyzeCardWithVision(imageUrl, actor);
-      setOcrDetected({
-        name: result.detectedName,
-        number: result.detectedNumber,
-      });
-      if (result.detectedName) {
-        setSearchQuery(result.detectedName);
-        await handleSearch(
-          result.detectedName,
-          result.detectedNumber ?? undefined,
+      const hints = await analyzeCardWithVision(imageUrl, actor);
+      setOcrHints(hints);
+
+      if (!hints.detectedName && hints.candidateNames.length === 0) {
+        toast.error(
+          "Vision OCR returned no usable hints. Try better lighting or retake the photo.",
         );
+        return;
+      }
+
+      // Fill search bar with best name
+      if (hints.detectedName) setSearchQuery(hints.detectedName);
+
+      // Run the ranked search
+      setIsSearching(true);
+      try {
+        const { results: rankedResults, autoSelect } =
+          await searchForPokemonCard(hints);
+        setResults(rankedResults);
+
+        if (rankedResults.length === 0) {
+          toast.error(
+            "Pokémon TCG API returned no matches. Try searching manually.",
+          );
+        } else if (autoSelect) {
+          // High-confidence auto-select: jump straight to confirm
+          setSelectedResult(rankedResults[0]);
+          setStep("confirm");
+          toast.success(
+            `Auto-matched: ${rankedResults[0].name} — verify before adding.`,
+          );
+        }
+        // Otherwise: show results list and let user pick
+      } finally {
+        setIsSearching(false);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      toast.error(`Card scan failed: ${message}`);
-      setOcrDetected({ name: null, number: null });
+      // Surface the specific failure source in the toast
+      if (message.includes("backend is not ready")) {
+        toast.error(message);
+      } else if (message.includes("not configured")) {
+        toast.error(
+          "Vision API key is not configured. Ask the admin to add it via the admin dashboard.",
+        );
+      } else if (message.includes("Vision API error")) {
+        toast.error(`Card scan failed: ${message}`);
+      } else {
+        toast.error(`Card scan failed: ${message}`);
+      }
+      setOcrHints({
+        detectedName: null,
+        candidateNames: [],
+        collectorNumber: null,
+        printedTotal: null,
+        rawNumberText: null,
+        rawText: "",
+        confidenceBucket: "low",
+      });
     } finally {
       setIsOcrRunning(false);
     }
@@ -275,6 +315,10 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
     onClose();
   };
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -302,7 +346,6 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
           style={{ borderColor: "oklch(0.28 0.012 265)" }}
         >
           <div className="flex items-center gap-3">
-            {/* Steps indicator */}
             {(["camera", "search", "confirm"] as Step[]).map((s, i) => (
               <div key={s} className="flex items-center gap-2">
                 <div
@@ -355,7 +398,7 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
         {/* Content */}
         <div className="flex-1 overflow-y-auto">
           <AnimatePresence mode="wait">
-            {/* Step 1: Camera */}
+            {/* ---- Step 1: Camera ---- */}
             {step === "camera" && (
               <motion.div
                 key="camera"
@@ -376,7 +419,6 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                   </p>
                 </div>
 
-                {/* Change 4: Actor loading warning banner — above the camera viewport */}
                 {actorLoading && (
                   <div
                     className="flex items-center gap-2 px-3 py-2 rounded-md text-sm"
@@ -428,22 +470,18 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                       className="relative"
                       style={{ width: "45%", aspectRatio: "245/342" }}
                     >
-                      {/* Top-left corner */}
                       <div
                         className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 rounded-tl"
                         style={{ borderColor: "oklch(0.72 0.2 250)" }}
                       />
-                      {/* Top-right corner */}
                       <div
                         className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 rounded-tr"
                         style={{ borderColor: "oklch(0.72 0.2 250)" }}
                       />
-                      {/* Bottom-left corner */}
                       <div
                         className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 rounded-bl"
                         style={{ borderColor: "oklch(0.72 0.2 250)" }}
                       />
-                      {/* Bottom-right corner */}
                       <div
                         className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 rounded-br"
                         style={{ borderColor: "oklch(0.72 0.2 250)" }}
@@ -509,7 +547,6 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                   <button
                     type="button"
                     onClick={handleCapture}
-                    // Change 3: also disable when actor is not ready
                     disabled={
                       !camera.isActive ||
                       camera.isLoading ||
@@ -557,7 +594,7 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
               </motion.div>
             )}
 
-            {/* Step 2: Search */}
+            {/* ---- Step 2: Search ---- */}
             {step === "search" && (
               <motion.div
                 key="search"
@@ -594,13 +631,15 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                       style={{ color: "oklch(0.52 0.01 265)" }}
                     >
                       {capturedImage
-                        ? "Analyzing your card with Google Vision…"
-                        : "Type the Pokemon name to search the database."}
+                        ? isOcrRunning
+                          ? "Analyzing your card with Google Vision…"
+                          : "Search results below, or edit the name to search again."
+                        : "Type the Pokémon name to search the database."}
                     </p>
                   </div>
                 </div>
 
-                {/* OCR status banner */}
+                {/* OCR status / hints banner */}
                 {capturedImage && (
                   <div>
                     {isOcrRunning && (
@@ -619,58 +658,78 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                         </span>
                       </div>
                     )}
+
                     {!isOcrRunning &&
-                      ocrDetected !== null &&
-                      (ocrDetected.name || ocrDetected.number ? (
+                      ocrHints !== null &&
+                      (ocrHints.detectedName || ocrHints.collectorNumber ? (
                         <div
-                          className="flex items-center gap-2 px-3 py-2.5 rounded-md text-sm"
+                          className="px-3 py-2.5 rounded-md text-sm space-y-1"
                           style={{
-                            background: "oklch(0.18 0.08 145 / 0.25)",
-                            border: "1px solid oklch(0.45 0.12 145 / 0.4)",
-                            color: "oklch(0.72 0.12 145)",
+                            ...CONFIDENCE_BADGE[ocrHints.confidenceBucket]
+                              .style,
                           }}
                           data-ocid="scan.ocr_success_state"
                         >
-                          <CheckCircle className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span>
-                            Vision detected:{" "}
-                            {[ocrDetected.name, ocrDetected.number]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <CheckCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="font-medium">
+                              {
+                                CONFIDENCE_BADGE[ocrHints.confidenceBucket]
+                                  .label
+                              }{" "}
+                              — Vision detected:
+                            </span>
+                          </div>
+                          <div
+                            className="pl-5 text-xs space-y-0.5"
+                            style={{ opacity: 0.9 }}
+                          >
+                            {ocrHints.detectedName && (
+                              <div>Name: {ocrHints.detectedName}</div>
+                            )}
+                            {ocrHints.collectorNumber && (
+                              <div>
+                                Card #{ocrHints.collectorNumber}
+                                {ocrHints.printedTotal
+                                  ? ` / ${ocrHints.printedTotal}`
+                                  : ""}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ) : (
                         <div
                           className="px-3 py-2.5 rounded-md text-sm"
                           style={{
-                            background: "oklch(0.18 0.06 30 / 0.25)",
-                            border: "1px solid oklch(0.45 0.1 30 / 0.4)",
-                            color: "oklch(0.72 0.1 30)",
+                            background: "oklch(0.18 0.04 30 / 0.3)",
+                            border: "1px solid oklch(0.4 0.08 30 / 0.4)",
+                            color: "oklch(0.72 0.08 30)",
                           }}
-                          data-ocid="scan.ocr_error_state"
+                          data-ocid="scan.ocr_empty_state"
                         >
-                          Could not identify card — search manually below
+                          Vision OCR returned no usable hints — try better
+                          lighting or retake the photo.
                         </div>
                       ))}
                   </div>
                 )}
 
-                {/* Search input */}
+                {/* Search bar */}
                 <div className="flex gap-2">
                   <div className="relative flex-1">
                     <Search
-                      className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none"
+                      className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
                       style={{ color: "oklch(0.42 0.01 265)" }}
                     />
                     <input
                       ref={searchInputRef}
                       type="text"
+                      placeholder="Search Pokémon name…"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && handleSearch(searchQuery)
-                      }
-                      placeholder="e.g. Charizard, Pikachu, Mewtwo…"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleManualSearch(searchQuery);
+                      }}
                       className="w-full pl-9 pr-3 py-2.5 text-sm rounded-md border outline-none"
                       style={{
                         background: "oklch(0.145 0.01 265)",
@@ -682,9 +741,9 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                   </div>
                   <button
                     type="button"
-                    onClick={() => handleSearch(searchQuery)}
+                    onClick={() => handleManualSearch(searchQuery)}
                     disabled={isSearching || !searchQuery.trim()}
-                    className="px-4 py-2.5 text-sm font-semibold rounded-md flex items-center gap-2 transition-colors disabled:opacity-50"
+                    className="px-4 py-2.5 text-sm font-medium rounded-md transition-colors disabled:opacity-40"
                     style={{
                       background: "oklch(0.58 0.2 250)",
                       color: "white",
@@ -694,9 +753,8 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
                     {isSearching ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
-                      <Search className="w-4 h-4" />
+                      "Search"
                     )}
-                    Search
                   </button>
                 </div>
 
@@ -798,7 +856,7 @@ export default function ScanCard({ onClose, onAddCard }: ScanCardProps) {
               </motion.div>
             )}
 
-            {/* Step 3: Confirm */}
+            {/* ---- Step 3: Confirm ---- */}
             {step === "confirm" && selectedResult && (
               <motion.div
                 key="confirm"
